@@ -2,7 +2,7 @@ from typing import List
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
-from src.agent.tools.weather import create_weather_tool
+from src.agent.tools.weather import create_weather_tool, create_forecast_tool
 from src.agent.tools.calendar import create_calendar_tool
 from src.agent.tools.n8n_client import create_n8n_tool
 from src.agent.types import ToolContext
@@ -12,16 +12,23 @@ def build_agent(ctx: ToolContext):
     # Create tools with context bound via closures
     tools = [
         create_weather_tool(ctx),
+        create_forecast_tool(ctx),
         create_calendar_tool(ctx),
         create_n8n_tool(ctx),
     ]
     
-    # Create a ReAct prompt template
+    # Create a ReAct prompt template with improved instructions
     prompt = PromptTemplate.from_template("""
 You are a helpful assistant that can coordinate schedules and activities.
 
 You have access to the following tools:
 {tools}
+
+IMPORTANT INSTRUCTIONS:
+- When users ask about "warmest day", "best weather", or comparing days, you MUST use the get_weather_forecast tool to get forecast data for multiple days, then analyze and compare them.
+- Break down complex requests into steps. For example, "warmest day this week" requires: 1) Get forecast for the week, 2) Compare temperatures, 3) Identify the warmest day.
+- Always use the appropriate tool - use get_weather_forecast for multi-day comparisons, use check_weather for current conditions.
+- When comparing multiple days, analyze the forecast data you receive and clearly identify which day is best.
 
 Use the following format:
 
