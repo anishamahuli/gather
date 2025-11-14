@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+*.pyc
 
 # C extensions
 *.so
@@ -144,6 +145,12 @@ ENV/
 env.bak/
 venv.bak/
 
+# Google OAuth credentials (NEVER commit these!)
+credentials.json
+*credentials*.json
+client_secret*.json
+google-credentials.json
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -158,6 +165,7 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+data/*.json
 
 # Pyre type checker
 .pyre/
