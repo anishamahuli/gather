@@ -3,7 +3,13 @@ from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
 from src.agent.tools.weather import create_weather_tool, create_forecast_tool
-from src.agent.tools.calendar import create_calendar_tool
+from src.agent.tools.calendar import (
+    create_calendar_tool,
+    create_get_events_tool,
+    create_find_free_times_tool,
+    create_create_event_tool,
+    create_parse_date_tool
+)
 from src.agent.tools.n8n_client import create_n8n_tool
 from src.agent.types import ToolContext
 
@@ -11,15 +17,24 @@ def build_agent(ctx: ToolContext):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     # Create tools with context bound via closures
     tools = [
+        create_parse_date_tool(ctx),  # Add date parsing tool first
         create_weather_tool(ctx),
         create_forecast_tool(ctx),
         create_calendar_tool(ctx),
+        create_get_events_tool(ctx),
+        create_find_free_times_tool(ctx),
+        create_create_event_tool(ctx),
         create_n8n_tool(ctx),
     ]
+    
+    # Get user_id from calendar client
+    user_id = ctx.calendar_client.user_id if ctx.calendar_client else "me"
     
     # Create a ReAct prompt template with improved instructions
     prompt = PromptTemplate.from_template("""
 You are a helpful assistant that can coordinate schedules and activities.
+
+IMPORTANT: The current user ID is "{user_id}". Always use this user_id when calling calendar tools.
 
 You have access to the following tools:
 {tools}
@@ -29,6 +44,25 @@ IMPORTANT INSTRUCTIONS:
 - Break down complex requests into steps. For example, "warmest day this week" requires: 1) Get forecast for the week, 2) Compare temperatures, 3) Identify the warmest day.
 - Always use the appropriate tool - use get_weather_forecast for multi-day comparisons, use check_weather for current conditions.
 - When comparing multiple days, analyze the forecast data you receive and clearly identify which day is best.
+- For scheduling requests, follow these EXACT steps:
+  - If the user mentions a specific time (e.g., "at 6pm", "at 2pm"), parse it: parse_date("Friday", "18:00:00") for 6pm
+  - Calculate end time: if start is 6pm (18:00), end should be 8pm (20:00) for a 2-hour dinner
+  - For events with specific times, you DON'T need to call find_available_times - just parse the date and suggest creating the event
+  - For events without specific times, use parse_date("Friday", "09:00:00") for start and parse_date("Friday", "18:00:00") for end, then use find_available_times
+  - IMPORTANT: When calling parse_date, pass parameters as simple values: parse_date("Friday", "18:00:00") NOT parse_date(date_description="Friday", default_time="18:00:00")
+  - After getting dates, suggest the event details to the user (don't create automatically)
+  - STOP after providing the suggestion - do NOT call tools repeatedly
+- CRITICAL RULES:
+  - When calling parse_date, use simple format: parse_date("Friday", "18:00:00") NOT parse_date(date_description="Friday", default_time="18:00:00")
+  - If user says "at 6pm" or "at 2pm", convert to 24-hour: 6pm = "18:00:00", 2pm = "14:00:00"
+  - Call each tool exactly ONCE per step - do NOT retry or call the same tool multiple times
+  - If a tool returns an error, include that error in your final answer and STOP
+  - For event creation requests, parse the date/time, then suggest the event details to the user (don't create automatically)
+  - Never call create_calendar_event automatically - only suggest times to the user
+- Always use parse_date FIRST for day names like "Friday", "Wednesday", "this Friday"
+- Examples: 
+  - "this Friday at 6pm" → parse_date("this Friday at 6pm") OR parse_date("this Friday", "18:00:00")
+  - "Friday" → parse_date("Friday", "09:00:00") for start, parse_date("Friday", "18:00:00") for end
 
 Use the following format:
 
@@ -47,11 +81,30 @@ Question: {input}
 Thought:{agent_scratchpad}
 """)
     
-    agent = create_react_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, handle_parsing_errors=True)
+    # Format prompt with user_id
+    formatted_prompt = prompt.partial(user_id=user_id)
+    agent = create_react_agent(llm, tools, formatted_prompt)
+    agent_executor = AgentExecutor(
+        agent=agent, 
+        tools=tools, 
+        verbose=True,  # Enable verbose to debug - check terminal/console for output
+        handle_parsing_errors="Check your output and make sure to respond with a valid json blob, or use the Final Answer action.",
+        max_iterations=12,  # Reduced to prevent excessive loops
+        max_execution_time=90  # 90 second timeout
+    )
     return agent_executor
 
 def run_task(ctx: ToolContext, user_prompt: str) -> str:
     agent = build_agent(ctx)
-    result = agent.invoke({"input": user_prompt})
-    return result.get("output", str(result))
+    try:
+        result = agent.invoke({"input": user_prompt})
+        return result.get("output", str(result))
+    except Exception as e:
+        # Handle timeout or other errors gracefully
+        error_msg = str(e)
+        if "timeout" in error_msg.lower() or "max_execution_time" in error_msg.lower():
+            return "I apologize, but the request took too long to process. This might be due to calendar API delays or complex scheduling. Please try again with a simpler request, or check your calendar connection."
+        elif "max_iterations" in error_msg.lower():
+            return "I apologize, but I reached the maximum number of steps while processing your request. Please try rephrasing your request more simply, or break it into smaller parts."
+        else:
+            return f"I encountered an error while processing your request: {error_msg}. Please try again or rephrase your request."

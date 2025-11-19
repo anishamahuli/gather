@@ -150,6 +150,8 @@ credentials.json
 *credentials*.json
 client_secret*.json
 google-credentials.json
+**/google_tokens.json
+data/users/**/*tokens*.json
 
 # Spyder project settings
 .spyderproject
