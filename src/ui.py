@@ -13,6 +13,7 @@ from src.integrations.calendar_api import CalendarClient
 from src.integrations.google_auth import is_authenticated, get_authorization_url, complete_authorization_with_code
 from src.agent.types import ToolContext
 from src.agent.coordinator import run_task
+from src.agent.memory import get_memory, save_memory, clear_memory
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -63,6 +64,9 @@ if "pending_event" not in st.session_state:
 if "auth_code" not in st.session_state:
     st.session_state.auth_code = None
 
+if "memory" not in st.session_state:
+    st.session_state.memory = None
+
 if "tool_context" not in st.session_state:
     # Initialize configuration
     load_config()
@@ -94,6 +98,11 @@ with st.sidebar:
     # Update calendar client if user ID changes
     if user_id != st.session_state.tool_context.calendar_client.user_id:
         st.session_state.tool_context.calendar_client = CalendarClient(user_id=user_id)
+    
+    # Initialize or reload memory if user ID changed
+    if st.session_state.memory is None or user_id != st.session_state.get("current_user_id", None):
+        st.session_state.memory = get_memory(user_id, window_size=20)
+        st.session_state.current_user_id = user_id
     
     st.divider()
     st.subheader("Google Calendar")
@@ -171,6 +180,9 @@ with st.sidebar:
     if st.button("Clear Chat History"):
         st.session_state.messages = []
         st.session_state.pending_event = None
+        if st.session_state.memory:
+            clear_memory(user_id)
+            st.session_state.memory = get_memory(user_id, window_size=20)
         st.rerun()
 
 # Main UI
@@ -252,8 +264,14 @@ if prompt := st.chat_input("Type your request here..."):
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                result = run_task(st.session_state.tool_context, prompt)
+                # Use memory if available
+                memory = st.session_state.memory if st.session_state.memory else None
+                result, tool_calls = run_task(st.session_state.tool_context, prompt, memory=memory)
                 st.write(result)
+                
+                # Save memory after getting response (with tool calls)
+                if memory:
+                    save_memory(user_id, memory, tool_calls=tool_calls if tool_calls else None, max_messages_in_file=100)
                 
                 # Check if agent response contains event creation suggestion
                 # Look for patterns that indicate the agent is suggesting an event

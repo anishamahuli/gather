@@ -153,6 +153,9 @@ google-credentials.json
 **/google_tokens.json
 data/users/**/*tokens*.json
 
+# User conversation data (NEVER commit these!)
+data/users/**/conversations.json
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -168,6 +171,9 @@ data/users/**/*tokens*.json
 .dmypy.json
 dmypy.json
 data/*.json
+
+# Documentation (user preference - not tracked)
+docs/
 
 # Pyre type checker
 .pyre/

@@ -1,7 +1,9 @@
-from typing import List
+from typing import List, Optional, Tuple
+from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferWindowMemory
 from src.agent.tools.weather import create_weather_tool, create_forecast_tool
 from src.agent.tools.calendar import (
     create_calendar_tool,
@@ -13,7 +15,7 @@ from src.agent.tools.calendar import (
 from src.agent.tools.n8n_client import create_n8n_tool
 from src.agent.types import ToolContext
 
-def build_agent(ctx: ToolContext):
+def build_agent(ctx: ToolContext, memory: Optional[ConversationBufferWindowMemory] = None):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     # Create tools with context bound via closures
     tools = [
@@ -30,11 +32,24 @@ def build_agent(ctx: ToolContext):
     # Get user_id from calendar client
     user_id = ctx.calendar_client.user_id if ctx.calendar_client else "me"
     
+    # Build chat history string from memory if available
+    chat_history_str = ""
+    if memory:
+        # Get chat history from memory
+        messages = memory.chat_memory.messages
+        if messages:
+            chat_history_str = "\n\nPrevious conversation:\n"
+            for msg in messages[-10:]:  # Show last 10 messages for context
+                if hasattr(msg, 'content'):
+                    role = "User" if msg.__class__.__name__ == "HumanMessage" else "Assistant"
+                    chat_history_str += f"{role}: {msg.content}\n"
+    
     # Create a ReAct prompt template with improved instructions
     prompt = PromptTemplate.from_template("""
 You are a helpful assistant that can coordinate schedules and activities.
 
 IMPORTANT: The current user ID is "{user_id}". Always use this user_id when calling calendar tools.
+{chat_history}
 
 You have access to the following tools:
 {tools}
@@ -81,12 +96,12 @@ Question: {input}
 Thought:{agent_scratchpad}
 """)
     
-    # Format prompt with user_id
-    formatted_prompt = prompt.partial(user_id=user_id)
+    # Format prompt with user_id and chat history
+    formatted_prompt = prompt.partial(user_id=user_id, chat_history=chat_history_str)
     agent = create_react_agent(llm, tools, formatted_prompt)
     agent_executor = AgentExecutor(
         agent=agent, 
-        tools=tools, 
+        tools=tools,
         verbose=True,  # Enable verbose to debug - check terminal/console for output
         handle_parsing_errors="Check your output and make sure to respond with a valid json blob, or use the Final Answer action.",
         max_iterations=12,  # Reduced to prevent excessive loops
@@ -94,11 +109,54 @@ Thought:{agent_scratchpad}
     )
     return agent_executor
 
-def run_task(ctx: ToolContext, user_prompt: str) -> str:
-    agent = build_agent(ctx)
+def run_task(ctx: ToolContext, user_prompt: str, memory: Optional[ConversationBufferWindowMemory] = None) -> tuple[str, list]:
+    """
+    Run agent task with memory.
+    
+    Returns:
+        tuple: (output_string, tool_calls_list)
+    """
+    # Add user message to memory before building agent (so it's in context)
+    if memory:
+        memory.chat_memory.add_user_message(user_prompt)
+    
+    agent = build_agent(ctx, memory=memory)
+    tool_calls = []
+    
     try:
         result = agent.invoke({"input": user_prompt})
-        return result.get("output", str(result))
+        output = result.get("output", str(result))
+        
+        # Extract tool calls from intermediate steps if available
+        if isinstance(result, dict):
+            # Try to get intermediate_steps
+            intermediate_steps = result.get("intermediate_steps", [])
+            for step in intermediate_steps:
+                try:
+                    if len(step) >= 2:
+                        # step[0] is usually an AgentAction, step[1] is the observation
+                        action = step[0]
+                        observation = step[1]
+                        
+                        tool_name = getattr(action, 'tool', str(action))
+                        tool_input = getattr(action, 'tool_input', {})
+                        tool_output = str(observation)[:500] if len(str(observation)) > 500 else str(observation)  # Truncate long outputs
+                        
+                        tool_calls.append({
+                            "tool": str(tool_name),
+                            "input": str(tool_input),
+                            "output": tool_output,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                except Exception as e:
+                    # If extraction fails, skip this tool call
+                    continue
+        
+        # Add assistant response to memory
+        if memory:
+            memory.chat_memory.add_ai_message(output)
+        
+        return output, tool_calls
     except Exception as e:
         # Handle timeout or other errors gracefully
         error_msg = str(e)
