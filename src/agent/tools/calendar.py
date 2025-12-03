@@ -10,20 +10,41 @@ def create_calendar_tool(ctx: ToolContext):
         Check if user is free on a given date and time.
         Args:
             user_id: User ID to check (optional, defaults to the current user)
-            date_iso: Date and time in ISO format (YYYY-MM-DDTHH:MM:SS) or just date (YYYY-MM-DD). 
+            date_iso: Date and time in ISO format (YYYY-MM-DDTHH:MM:SS) or just date (YYYY-MM-DD).
                      If empty, you must provide a valid ISO date string. Examples: "2025-11-15T14:00:00" or "2025-11-15T09:00:00"
         Returns: Whether the user is free or busy on that date/time.
         """
         if ctx.calendar_client is None:
             return "Calendar client not configured."
-        
+
+        # Parse parameters if they come as a single string (e.g., 'user_id="me", date_iso="2025-12-03T18:00:00"')
+        import re
+
+        # Check if it's comma-separated format: "me", "2025-12-03T18:00:00"
+        if user_id and ',' in user_id and not date_iso:
+            parts = [p.strip().strip('"').strip("'") for p in user_id.split(',', 1)]
+            if len(parts) >= 2:
+                user_id = parts[0]
+                date_iso = parts[1]
+
+        # Check if it's key=value format: user_id="me", date_iso="2025-12-03T18:00:00"
+        if user_id and 'date_iso=' in user_id and not date_iso:
+            match = re.search(r'date_iso=["\']([^"\']+)["\']', user_id)
+            if match:
+                date_iso = match.group(1)
+            match = re.search(r'user_id=["\']([^"\']+)["\']', user_id)
+            if match:
+                user_id = match.group(1)
+            else:
+                user_id = ""
+
         # Use user_id from calendar client if not provided
         if not user_id or user_id.strip() == "":
             user_id = ctx.calendar_client.user_id
-        
+
         if not date_iso or date_iso.strip() == "":
             return "Error: date_iso parameter is required. Provide date in ISO format like '2025-11-15T14:00:00'"
-        
+
         try:
             free = ctx.calendar_client.is_free(date_iso)
             return f"{user_id} is {'free' if free else 'busy'} on {date_iso.split('T')[0]}"
@@ -46,7 +67,22 @@ def create_get_events_tool(ctx: ToolContext):
         """
         if ctx.calendar_client is None:
             return "Calendar client not configured."
-        
+
+        # Parse parameters if they come as a single string
+        import re
+        if user_id and ('start_date=' in user_id or 'end_date=' in user_id) and not start_date:
+            match = re.search(r'start_date=["\']([^"\']+)["\']', user_id)
+            if match:
+                start_date = match.group(1)
+            match = re.search(r'end_date=["\']([^"\']+)["\']', user_id)
+            if match:
+                end_date = match.group(1)
+            match = re.search(r'user_id=["\']([^"\']+)["\']', user_id)
+            if match:
+                user_id = match.group(1)
+            else:
+                user_id = ""
+
         # Use user_id from calendar client if not provided
         if not user_id or user_id.strip() == "":
             user_id = ctx.calendar_client.user_id
@@ -109,7 +145,7 @@ def create_find_free_times_tool(ctx: ToolContext):
                 start_date = parts[1]
         
         # Also try to parse named parameter format: user_id="me", start_date="...", end_date="..."
-        if user_id and "start_date" in str(user_id) and start_date == "":
+        if user_id and "=" in str(user_id) and ("start_date=" in str(user_id) or "end_date=" in str(user_id) or "duration_minutes=" in str(user_id)):
             match = re.search(r'start_date=["\']([^"\']+)["\']', str(user_id))
             if match:
                 start_date = match.group(1)
@@ -122,6 +158,29 @@ def create_find_free_times_tool(ctx: ToolContext):
             match = re.search(r'user_id=["\']([^"\']+)["\']', str(user_id))
             if match:
                 user_id = match.group(1)
+            else:
+                user_id = ""
+
+        # Also check if other parameters have the malformed string
+        if "duration_minutes=" in str(duration_minutes):
+            match = re.search(r'duration_minutes=["\']([^"\']+)["\']', str(duration_minutes))
+            if match:
+                duration_minutes = match.group(1)
+            else:
+                # Try without quotes
+                match = re.search(r'duration_minutes=(\d+)', str(duration_minutes))
+                if match:
+                    duration_minutes = match.group(1)
+
+        if "start_date=" in str(start_date):
+            match = re.search(r'start_date=["\']([^"\']+)["\']', str(start_date))
+            if match:
+                start_date = match.group(1)
+
+        if "end_date=" in str(end_date):
+            match = re.search(r'end_date=["\']([^"\']+)["\']', str(end_date))
+            if match:
+                end_date = match.group(1)
         
         # Use user_id from calendar client if not provided
         if not user_id or user_id.strip() == "":
@@ -159,7 +218,7 @@ def create_find_free_times_tool(ctx: ToolContext):
 def create_create_event_tool(ctx: ToolContext):
     """Factory function to create calendar event tool (requires confirmation)."""
     @tool("create_calendar_event", return_direct=False)
-    def create_calendar_event(user_id: str = "", title: str = "", start_iso: str = "", end_iso: str = "", 
+    def create_calendar_event(user_id: str = "", title: str = "", start_iso: str = "", end_iso: str = "",
                               description: str = "", location: str = "") -> str:
         """
         Create a calendar event. NOTE: This tool should only be called after user approval.
@@ -174,7 +233,89 @@ def create_create_event_tool(ctx: ToolContext):
         """
         if ctx.calendar_client is None:
             return "Calendar client not configured."
-        
+
+        # Parse parameters if they come as a single string or JSON
+        import re
+        import json
+
+        # Check if it's key=value format FIRST (most common): user_id="me", title="Dinner", ...
+        # This needs to be checked before comma-separated to avoid conflicts
+        if user_id and '=' in user_id and ('title=' in user_id or 'start_iso=' in user_id or 'end_iso=' in user_id) and not title:
+            # Extract all parameters using regex
+            match = re.search(r'user_id=["\']([^"\']+)["\']', user_id)
+            extracted_user_id = match.group(1) if match else ""
+
+            match = re.search(r'title=["\']([^"\']+)["\']', user_id)
+            if match:
+                title = match.group(1)
+
+            match = re.search(r'start_iso=["\']([^"\']+)["\']', user_id)
+            if match:
+                start_iso = match.group(1)
+
+            match = re.search(r'end_iso=["\']([^"\']+)["\']', user_id)
+            if match:
+                end_iso = match.group(1)
+
+            match = re.search(r'description=["\']([^"\']*)["\']', user_id)
+            if match:
+                description = match.group(1)
+
+            match = re.search(r'location=["\']([^"\']*)["\']', user_id)
+            if match:
+                location = match.group(1)
+
+            user_id = extracted_user_id
+
+        # Check if it's comma-separated format: "me", "Dinner", "2025-12-03T18:00:00", "2025-12-03T20:00:00", "", ""
+        elif user_id and ',' in user_id and not title and '=' not in user_id:
+            parts = [p.strip().strip('"').strip("'") for p in user_id.split(',')]
+            if len(parts) >= 4:
+                user_id = parts[0]
+                title = parts[1]
+                start_iso = parts[2]
+                end_iso = parts[3]
+                if len(parts) >= 5:
+                    description = parts[4]
+                if len(parts) >= 6:
+                    location = parts[5]
+
+        # Try to parse as JSON (e.g., '{"user_id": "me", "title": "Dinner", ...}')
+        elif user_id and user_id.strip().startswith('{') and not title:
+            try:
+                params = json.loads(user_id)
+                user_id = params.get('user_id', '')
+                title = params.get('title', '')
+                start_iso = params.get('start_iso', '')
+                end_iso = params.get('end_iso', '')
+                description = params.get('description', '')
+                location = params.get('location', '')
+            except json.JSONDecodeError:
+                pass  # Fall through
+
+        # Legacy regex parsing (shouldn't be needed anymore but kept for safety)
+        if user_id and ('title=' in user_id or 'start_iso=' in user_id) and not title:
+            match = re.search(r'title=["\']([^"\']+)["\']', user_id)
+            if match:
+                title = match.group(1)
+            match = re.search(r'start_iso=["\']([^"\']+)["\']', user_id)
+            if match:
+                start_iso = match.group(1)
+            match = re.search(r'end_iso=["\']([^"\']+)["\']', user_id)
+            if match:
+                end_iso = match.group(1)
+            match = re.search(r'description=["\']([^"\']+)["\']', user_id)
+            if match:
+                description = match.group(1)
+            match = re.search(r'location=["\']([^"\']+)["\']', user_id)
+            if match:
+                location = match.group(1)
+            match = re.search(r'user_id=["\']([^"\']+)["\']', user_id)
+            if match:
+                user_id = match.group(1)
+            else:
+                user_id = ""
+
         # Use user_id from calendar client if not provided
         if not user_id or user_id.strip() == "":
             user_id = ctx.calendar_client.user_id
@@ -241,17 +382,30 @@ def create_parse_date_tool(ctx: ToolContext):
                     default_time = parts[1] if parts[1] else default_time
             
             date_lower = date_description.lower().strip()
-            
+
             # IMPORTANT: Always use the default_time parameter - it's passed by the agent
             # Ensure default_time is set
             if not default_time or default_time.strip() == "":
                 default_time = "09:00:00"
             time_str = default_time.strip()
-            
+
             # Ensure time_str is in HH:MM:SS format
             if len(time_str.split(':')) == 2:
                 time_str = time_str + ":00"
-            
+
+            # Handle "tonight" - treat as today but with evening time
+            if "tonight" in date_lower:
+                # If no time specified, default to 18:00:00 (6 PM) for "tonight"
+                if default_time == "09:00:00":  # Using the default morning time
+                    time_str = "18:00:00"
+                if "at" in date_description:
+                    # Try to extract time from original
+                    parts = date_description.lower().split("at")
+                    if len(parts) > 1:
+                        time_part = parts[1].strip()
+                        time_str = _parse_time(time_part)
+                return f"{today.strftime('%Y-%m-%d')}T{time_str}"
+
             # Handle "today"
             if date_lower == "today":
                 if "at" in date_description:
@@ -263,7 +417,7 @@ def create_parse_date_tool(ctx: ToolContext):
                 return f"{today.strftime('%Y-%m-%d')}T{time_str}"
             
             # Handle "tomorrow"
-            if date_lower == "tomorrow":
+            if "tomorrow" in date_lower:
                 if "at" in date_description:
                     parts = date_description.lower().split("at")
                     if len(parts) > 1:
@@ -340,7 +494,15 @@ def create_parse_date_tool(ctx: ToolContext):
 def _parse_time(time_str: str) -> str:
     """Parse time string to HH:MM:SS format."""
     time_str = time_str.strip().lower()
-    
+
+    # Handle "noon"
+    if "noon" in time_str:
+        return "12:00:00"
+
+    # Handle "midnight"
+    if "midnight" in time_str:
+        return "00:00:00"
+
     # Handle "2pm", "2 pm", "14:00", etc.
     if "pm" in time_str or "am" in time_str:
         # 12-hour format
