@@ -60,15 +60,18 @@ IMPORTANT INSTRUCTIONS:
 - Always use the appropriate tool - use get_weather_forecast for multi-day comparisons, use check_weather for current conditions.
 - When comparing multiple days, analyze the forecast data you receive and clearly identify which day is best.
 - For scheduling/calendar requests:
+  - If user explicitly asks to "put it on my calendar", "schedule it", "add it to my calendar", "create an event", etc.:
+    * This IS user confirmation - proceed to create the event
+    * If no specific time is given, use find_available_times to find a good slot, then create_calendar_event
+    * Pick a reasonable time if multiple options are available (e.g., first available slot, or a time like 2pm if available)
+    * Create the event directly - don't ask for confirmation again
   - If user specifies EXACT times (e.g., "dinner at 6 PM", "meeting from 2-3 PM"):
     * Parse the date/time
-    * Immediately suggest the event in Final Answer
-    * DO NOT call find_available_times - the time is already specified
-    * Example: "I'll create a Dinner event on Wednesday at 6 PM to 8 PM. Should I add this to your calendar?"
-  - If user says "schedule a meeting" WITHOUT specific time:
-    * Use find_available_times to suggest free slots
-    * Then ask user which time they prefer
-  - NEVER call create_calendar_event without user confirmation
+    * If they asked to "put it on my calendar" or similar, create the event immediately
+    * Otherwise, suggest the event and ask for confirmation
+  - If user just asks "when am I free?" or "what times are available?" WITHOUT asking to schedule:
+    * Use find_available_times to show options
+    * DO NOT create an event - just show the available times
 - CRITICAL: After getting all information needed, ALWAYS provide a Final Answer immediately
 - DO NOT call the same tool multiple times in a row
 - NEVER loop - if you have the information, provide the Final Answer

@@ -127,8 +127,35 @@ def create_find_free_times_tool(ctx: ToolContext):
         
         # Parse input if it's passed as a single string (LangChain sometimes does this)
         import re
+        
+        # First, check if the entire action input came in as user_id (most common case)
+        # Format: user_id="me", start_date="2025-12-07T09:00:00", end_date="2025-12-07T18:00:00", duration_minutes="60"
+        combined_input = str(user_id) if user_id else ""
+        if combined_input and "=" in combined_input and ("start_date=" in combined_input or "end_date=" in combined_input):
+            # Extract all parameters from the combined string
+            match = re.search(r'user_id=["\']([^"\']+)["\']', combined_input)
+            if match:
+                user_id = match.group(1)
+            
+            match = re.search(r'start_date=["\']([^"\']+)["\']', combined_input)
+            if match:
+                start_date = match.group(1)
+            
+            match = re.search(r'end_date=["\']([^"\']+)["\']', combined_input)
+            if match:
+                end_date = match.group(1)
+            
+            match = re.search(r'duration_minutes=["\']([^"\']+)["\']', combined_input)
+            if match:
+                duration_minutes = match.group(1)
+            else:
+                # Try without quotes
+                match = re.search(r'duration_minutes=(\d+)', combined_input)
+                if match:
+                    duration_minutes = match.group(1)
+        
         # Check if user_id contains comma-separated values (LangChain passes as "me", "date1", "date2", "60")
-        if user_id and "," in user_id and start_date == "":
+        elif user_id and "," in user_id and start_date == "":
             # Try to parse comma-separated format: "me", "2025-11-21T18:00:00", "2025-11-21T20:00:00", "60"
             parts = [p.strip().strip('"').strip("'") for p in user_id.split(',')]
             if len(parts) >= 4:
@@ -144,40 +171,23 @@ def create_find_free_times_tool(ctx: ToolContext):
                 user_id = parts[0]
                 start_date = parts[1]
         
-        # Also try to parse named parameter format: user_id="me", start_date="...", end_date="..."
-        if user_id and "=" in str(user_id) and ("start_date=" in str(user_id) or "end_date=" in str(user_id) or "duration_minutes=" in str(user_id)):
-            match = re.search(r'start_date=["\']([^"\']+)["\']', str(user_id))
-            if match:
-                start_date = match.group(1)
-            match = re.search(r'end_date=["\']([^"\']+)["\']', str(user_id))
-            if match:
-                end_date = match.group(1)
-            match = re.search(r'duration_minutes=["\']([^"\']+)["\']', str(user_id))
-            if match:
-                duration_minutes = match.group(1)
-            match = re.search(r'user_id=["\']([^"\']+)["\']', str(user_id))
-            if match:
-                user_id = match.group(1)
-            else:
-                user_id = ""
-
-        # Also check if other parameters have the malformed string
-        if "duration_minutes=" in str(duration_minutes):
-            match = re.search(r'duration_minutes=["\']([^"\']+)["\']', str(duration_minutes))
+        # Clean up any remaining malformed parameters
+        if duration_minutes and ("duration_minutes=" in str(duration_minutes) or not str(duration_minutes).strip().isdigit()):
+            match = re.search(r'duration_minutes=["\']?([^"\',\s]+)["\']?', str(duration_minutes))
             if match:
                 duration_minutes = match.group(1)
             else:
-                # Try without quotes
-                match = re.search(r'duration_minutes=(\d+)', str(duration_minutes))
+                # Try to extract just the number
+                match = re.search(r'(\d+)', str(duration_minutes))
                 if match:
                     duration_minutes = match.group(1)
 
-        if "start_date=" in str(start_date):
+        if start_date and "start_date=" in str(start_date):
             match = re.search(r'start_date=["\']([^"\']+)["\']', str(start_date))
             if match:
                 start_date = match.group(1)
 
-        if "end_date=" in str(end_date):
+        if end_date and "end_date=" in str(end_date):
             match = re.search(r'end_date=["\']([^"\']+)["\']', str(end_date))
             if match:
                 end_date = match.group(1)
@@ -185,6 +195,13 @@ def create_find_free_times_tool(ctx: ToolContext):
         # Use user_id from calendar client if not provided
         if not user_id or user_id.strip() == "":
             user_id = ctx.calendar_client.user_id
+        
+        # Clean up duration_minutes - strip quotes and whitespace
+        if duration_minutes:
+            duration_minutes = str(duration_minutes).strip().strip('"').strip("'")
+            # Remove any remaining "duration_minutes=" prefix
+            if duration_minutes.startswith("duration_minutes="):
+                duration_minutes = duration_minutes.replace("duration_minutes=", "").strip().strip('"').strip("'")
         
         # Debug: Check what we received
         if not start_date or start_date.strip() == "":
@@ -194,7 +211,10 @@ def create_find_free_times_tool(ctx: ToolContext):
             return f"Error: end_date is REQUIRED but received empty value. Received parameters: user_id='{user_id}', start_date='{start_date}', end_date='{end_date}'. Make sure to pass end_date as a separate parameter, not as part of a string."
         
         try:
-            duration = int(duration_minutes)
+            # Ensure duration_minutes is a valid integer string
+            if not duration_minutes or not str(duration_minutes).strip().isdigit():
+                duration_minutes = "60"  # Default fallback
+            duration = int(str(duration_minutes).strip())
             slots = ctx.calendar_client.find_free_slots(start_date, end_date, duration)
             
             if not slots:
@@ -398,33 +418,79 @@ def create_parse_date_tool(ctx: ToolContext):
                 # If no time specified, default to 18:00:00 (6 PM) for "tonight"
                 if default_time == "09:00:00":  # Using the default morning time
                     time_str = "18:00:00"
-                if "at" in date_description:
-                    # Try to extract time from original
-                    parts = date_description.lower().split("at")
+                if re.search(r'\bat\b', date_lower):
+                    # Try to extract time from original using word boundary
+                    parts = re.split(r'\bat\b', date_lower, maxsplit=1)
                     if len(parts) > 1:
                         time_part = parts[1].strip()
-                        time_str = _parse_time(time_part)
+                        try:
+                            time_str = _parse_time(time_part)
+                        except:
+                            pass  # If time parsing fails, use default
                 return f"{today.strftime('%Y-%m-%d')}T{time_str}"
 
             # Handle "today"
             if date_lower == "today":
-                if "at" in date_description:
-                    # Try to extract time from original
-                    parts = date_description.lower().split("at")
+                if re.search(r'\bat\b', date_lower):
+                    # Try to extract time from original using word boundary
+                    parts = re.split(r'\bat\b', date_lower, maxsplit=1)
                     if len(parts) > 1:
                         time_part = parts[1].strip()
-                        time_str = _parse_time(time_part)
+                        try:
+                            time_str = _parse_time(time_part)
+                        except:
+                            pass  # If time parsing fails, use default_time
                 return f"{today.strftime('%Y-%m-%d')}T{time_str}"
             
             # Handle "tomorrow"
             if "tomorrow" in date_lower:
-                if "at" in date_description:
-                    parts = date_description.lower().split("at")
+                if re.search(r'\bat\b', date_lower):
+                    # Try to extract time from original using word boundary
+                    parts = re.split(r'\bat\b', date_lower, maxsplit=1)
                     if len(parts) > 1:
                         time_part = parts[1].strip()
-                        time_str = _parse_time(time_part)
+                        try:
+                            time_str = _parse_time(time_part)
+                        except:
+                            pass  # If time parsing fails, use default_time
                 tomorrow = today + timedelta(days=1)
                 return f"{tomorrow.strftime('%Y-%m-%d')}T{time_str}"
+            
+            # Handle "this weekend" - return Saturday of this week
+            if "weekend" in date_lower:
+                current_day_num = today.weekday()
+                # Saturday is day 5 (0=Monday, 5=Saturday)
+                saturday_num = 5
+                days_until_saturday = saturday_num - current_day_num
+                if days_until_saturday < 0:  # Saturday already passed this week
+                    days_until_saturday += 7  # Next week's Saturday
+                elif days_until_saturday == 0 and "this" not in date_lower:
+                    # If today is Saturday and they said "weekend" (not "this weekend"), use next Saturday
+                    days_until_saturday = 7
+                saturday = today + timedelta(days=days_until_saturday)
+                return f"{saturday.strftime('%Y-%m-%d')}T{time_str}"
+            
+            # Try to parse as a full date string first (e.g., "December 7, 2023 11:00 AM")
+            # This handles cases where the agent receives a formatted date from previous context
+            date_formats = [
+                "%B %d, %Y %I:%M %p",  # "December 7, 2023 11:00 AM"
+                "%B %d, %Y",            # "December 7, 2023"
+                "%b %d, %Y %I:%M %p",  # "Dec 7, 2023 11:00 AM"
+                "%b %d, %Y",            # "Dec 7, 2023"
+                "%Y-%m-%d",             # "2025-12-07"
+                "%Y-%m-%d %H:%M:%S",    # "2025-12-07 11:00:00"
+                "%Y-%m-%dT%H:%M:%S",    # "2025-12-07T11:00:00"
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    parsed = datetime.strptime(date_description.strip(), fmt)
+                    # Extract time if it was in the format
+                    if "%I:%M %p" in fmt or "%H:%M" in fmt:
+                        time_str = parsed.strftime("%H:%M:%S")
+                    return f"{parsed.strftime('%Y-%m-%d')}T{time_str}"
+                except ValueError:
+                    continue
             
             # Handle day names (Monday, Tuesday, etc.)
             day_names = {
@@ -438,22 +504,20 @@ def create_parse_date_tool(ctx: ToolContext):
                 if day in date_lower:
                     day_name = day
                     # Check if there's a time specified in the date_description itself (e.g., "Friday at 2pm")
-                    if "at" in date_lower:
-                        parts = date_lower.split("at")
+                    # Use word boundary to avoid matching "at" as substring
+                    if re.search(r'\bat\b', date_lower):
+                        parts = re.split(r'\bat\b', date_lower, maxsplit=1)
                         if len(parts) > 1:
                             time_part = parts[1].strip()
-                            time_str = _parse_time(time_part)
+                            try:
+                                time_str = _parse_time(time_part)
+                            except:
+                                pass  # If time parsing fails, use default_time
                     # Otherwise, use the default_time parameter that was passed
                     break
             
             if day_name is None:
-                # Try to parse as a date string
-                try:
-                    # Try common date formats
-                    parsed = datetime.strptime(date_description, "%Y-%m-%d")
-                    return f"{parsed.strftime('%Y-%m-%d')}T{time_str}"
-                except:
-                    return f"Error: Could not parse date '{date_description}'. Use day names like 'Friday', 'Wednesday', or ISO dates like '2025-11-15'."
+                return f"Error: Could not parse date '{date_description}'. Supported formats: day names (e.g., 'Friday', 'Saturday'), dates like 'December 7, 2023', or ISO dates like '2025-12-07'."
             
             # Calculate the target day
             target_day_num = day_names[day_name]
@@ -493,38 +557,63 @@ def create_parse_date_tool(ctx: ToolContext):
 
 def _parse_time(time_str: str) -> str:
     """Parse time string to HH:MM:SS format."""
-    time_str = time_str.strip().lower()
+    try:
+        time_str = time_str.strip().lower()
+        
+        # Return default if empty or invalid
+        if not time_str or len(time_str) < 1:
+            return "09:00:00"
 
-    # Handle "noon"
-    if "noon" in time_str:
-        return "12:00:00"
+        # Handle "noon"
+        if "noon" in time_str:
+            return "12:00:00"
 
-    # Handle "midnight"
-    if "midnight" in time_str:
-        return "00:00:00"
+        # Handle "midnight"
+        if "midnight" in time_str:
+            return "00:00:00"
 
-    # Handle "2pm", "2 pm", "14:00", etc.
-    if "pm" in time_str or "am" in time_str:
-        # 12-hour format
-        time_str = time_str.replace(" ", "").replace(":", "")
-        if "pm" in time_str:
-            hour = int(time_str.replace("pm", ""))
-            if hour != 12:
-                hour += 12
-            time_str = time_str.replace("pm", "")
+        # Handle "2pm", "2 pm", "14:00", etc.
+        if "pm" in time_str or "am" in time_str:
+            # 12-hour format
+            time_str_clean = time_str.replace(" ", "").replace(":", "")
+            if "pm" in time_str_clean:
+                hour_str = time_str_clean.replace("pm", "")
+                if not hour_str or not hour_str.isdigit():
+                    return "09:00:00"  # Default fallback
+                hour = int(hour_str)
+                if hour != 12:
+                    hour += 12
+                if hour >= 24:
+                    hour = 23
+                return f"{hour:02d}:00:00"
+            else:  # am
+                hour_str = time_str_clean.replace("am", "")
+                if not hour_str or not hour_str.isdigit():
+                    return "09:00:00"  # Default fallback
+                hour = int(hour_str)
+                if hour == 12:
+                    hour = 0
+                return f"{hour:02d}:00:00"
+        elif ":" in time_str:
+            # 24-hour format like "14:00"
+            parts = time_str.split(":")
+            if not parts[0].isdigit():
+                return "09:00:00"  # Default fallback
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            if hour >= 24:
+                hour = 23
+            if minute >= 60:
+                minute = 59
+            return f"{hour:02d}:{minute:02d}:00"
         else:
-            hour = int(time_str.replace("am", ""))
-            if hour == 12:
-                hour = 0
-            time_str = time_str.replace("am", "")
-        return f"{hour:02d}:00:00"
-    elif ":" in time_str:
-        # 24-hour format like "14:00"
-        parts = time_str.split(":")
-        hour = int(parts[0])
-        minute = int(parts[1]) if len(parts) > 1 else 0
-        return f"{hour:02d}:{minute:02d}:00"
-    else:
-        # Just a number, assume hour
-        hour = int(time_str)
-        return f"{hour:02d}:00:00"
+            # Just a number, assume hour
+            if not time_str.isdigit():
+                return "09:00:00"  # Default fallback
+            hour = int(time_str)
+            if hour >= 24:
+                hour = 23
+            return f"{hour:02d}:00:00"
+    except (ValueError, AttributeError, IndexError):
+        # Return default time if parsing fails
+        return "09:00:00"
