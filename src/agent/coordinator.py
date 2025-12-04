@@ -59,27 +59,32 @@ IMPORTANT INSTRUCTIONS:
 - Break down complex requests into steps. For example, "warmest day this week" requires: 1) Get forecast for the week, 2) Compare temperatures, 3) Identify the warmest day.
 - Always use the appropriate tool - use get_weather_forecast for multi-day comparisons, use check_weather for current conditions.
 - When comparing multiple days, analyze the forecast data you receive and clearly identify which day is best.
-- For scheduling requests, follow these EXACT steps:
-  - If the user mentions a specific time (e.g., "at 6pm", "at 2pm"), parse it: parse_date("Friday", "18:00:00") for 6pm
-  - Calculate end time: if start is 6pm (18:00), end should be 8pm (20:00) for a 2-hour dinner
-  - For events with specific times, you DON'T need to call find_available_times - just parse the date and suggest creating the event
-  - For events without specific times, use parse_date("Friday", "09:00:00") for start and parse_date("Friday", "18:00:00") for end, then use find_available_times
-  - IMPORTANT: When calling parse_date, pass parameters as simple values: parse_date("Friday", "18:00:00") NOT parse_date(date_description="Friday", default_time="18:00:00")
-  - After getting dates, suggest the event details to the user (don't create automatically)
-  - STOP after providing the suggestion - do NOT call tools repeatedly
-- CRITICAL RULES:
-  - When calling parse_date, use simple format: parse_date("Friday", "18:00:00") NOT parse_date(date_description="Friday", default_time="18:00:00")
-  - If user says "at 6pm" or "at 2pm", convert to 24-hour: 6pm = "18:00:00", 2pm = "14:00:00"
-  - Call each tool exactly ONCE per step - do NOT retry or call the same tool multiple times
-  - If a tool returns an error, include that error in your final answer and STOP
-  - For event creation requests, parse the date/time, then suggest the event details to the user (don't create automatically)
-  - Never call create_calendar_event automatically - only suggest times to the user
-- Always use parse_date FIRST for day names like "Friday", "Wednesday", "this Friday"
-- Examples: 
-  - "this Friday at 6pm" → parse_date("this Friday at 6pm") OR parse_date("this Friday", "18:00:00")
-  - "Friday" → parse_date("Friday", "09:00:00") for start, parse_date("Friday", "18:00:00") for end
+- For scheduling/calendar requests:
+  - If user explicitly asks to "put it on my calendar", "schedule it", "add it to my calendar", "create an event", etc.:
+    * This IS user confirmation - proceed to create the event
+    * If no specific time is given, use find_available_times to find a good slot, then create_calendar_event
+    * Pick a reasonable time if multiple options are available (e.g., first available slot, or a time like 2pm if available)
+    * Create the event directly - don't ask for confirmation again
+  - If user specifies EXACT times (e.g., "dinner at 6 PM", "meeting from 2-3 PM"):
+    * Parse the date/time
+    * If they asked to "put it on my calendar" or similar, create the event immediately
+    * Otherwise, suggest the event and ask for confirmation
+  - If user just asks "when am I free?" or "what times are available?" WITHOUT asking to schedule:
+    * Use find_available_times to show options
+    * DO NOT create an event - just show the available times
+- CRITICAL: After getting all information needed, ALWAYS provide a Final Answer immediately
+- DO NOT call the same tool multiple times in a row
+- NEVER loop - if you have the information, provide the Final Answer
 
-Use the following format:
+OUTPUT FORMAT RULES (STRICTLY FOLLOW):
+1. After each tool use, you MUST include "Thought:" before your next action
+2. When ready to answer, you MUST format exactly as:
+   Thought: I now know the final answer
+   Final Answer: [your answer here]
+3. Do not write explanations or answers without the "Final Answer:" prefix
+4. If you write any response to the user, it MUST come after "Final Answer:"
+
+Use the following format (follow this EXACTLY):
 
 Question: the input question you must answer
 Thought: you should always think about what to do
@@ -99,13 +104,25 @@ Thought:{agent_scratchpad}
     # Format prompt with user_id and chat history
     formatted_prompt = prompt.partial(user_id=user_id, chat_history=chat_history_str)
     agent = create_react_agent(llm, tools, formatted_prompt)
+
+    # Custom error handler to provide better guidance
+    def handle_parsing_error(error) -> str:
+        """Custom error handler that reminds the agent of the correct format."""
+        return (
+            "PARSING ERROR. You must follow this EXACT format:\n"
+            "Thought: I now know the final answer\n"
+            "Final Answer: [your complete answer to the user]\n\n"
+            "Do NOT write any text without the proper prefix (Thought:, Action:, Action Input:, or Final Answer:).\n"
+            "If you already have the information needed, provide the Final Answer NOW."
+        )
+
     agent_executor = AgentExecutor(
-        agent=agent, 
+        agent=agent,
         tools=tools,
         verbose=True,  # Enable verbose to debug - check terminal/console for output
-        handle_parsing_errors="Check your output and make sure to respond with a valid json blob, or use the Final Answer action.",
-        max_iterations=12,  # Reduced to prevent excessive loops
-        max_execution_time=90  # 90 second timeout
+        handle_parsing_errors=handle_parsing_error,
+        max_iterations=6,  # Reduced to prevent excessive loops
+        max_execution_time=45  # 45 second timeout
     )
     return agent_executor
 
@@ -161,8 +178,8 @@ def run_task(ctx: ToolContext, user_prompt: str, memory: Optional[ConversationBu
         # Handle timeout or other errors gracefully
         error_msg = str(e)
         if "timeout" in error_msg.lower() or "max_execution_time" in error_msg.lower():
-            return "I apologize, but the request took too long to process. This might be due to calendar API delays or complex scheduling. Please try again with a simpler request, or check your calendar connection."
-        elif "max_iterations" in error_msg.lower():
-            return "I apologize, but I reached the maximum number of steps while processing your request. Please try rephrasing your request more simply, or break it into smaller parts."
+            return ("I apologize, but the request took too long to process. This might be due to calendar API delays or complex scheduling. Please try again with a simpler request, or check your calendar connection.", [])
+        elif "max_iterations" in error_msg.lower() or "iteration limit" in error_msg.lower():
+            return ("I apologize, but I reached the maximum number of steps while processing your request. Please try rephrasing your request more simply, or break it into smaller parts.", [])
         else:
-            return f"I encountered an error while processing your request: {error_msg}. Please try again or rephrase your request."
+            return (f"I encountered an error while processing your request: {error_msg}. Please try again or rephrase your request.", [])
